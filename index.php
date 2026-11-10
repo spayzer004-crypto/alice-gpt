@@ -47,7 +47,7 @@ function askOpenAI(string $message, array $history, Client $client): string
     $messages[] = ['role' => 'user', 'content' => $message];
 
     try {
-        $response = $client->post('/v1/chat/completions', [
+        $response = $client->post('v1/chat/completions', [
             'headers' => [
                 'Authorization' => 'Bearer ' . $apiKey,
                 'Content-Type' => 'application/json',
@@ -115,7 +115,7 @@ if ($userMessage === '') {
 } else {
     $history = $state['messages'];
     $client = new Client([
-        'base_uri' => 'https://api.groq.com/openai',
+        'base_uri' => 'https://api.groq.com/openai/',
         'timeout' => 30.0,
         'connect_timeout' => 10.0,
     ]);
