@@ -37,7 +37,7 @@ function cleanRequest(string $request): string
 
 function askOpenAI(string $message, array $history, Client $client): string
 {
-    $apiKey = $_ENV['OPENAI_API_KEY'] ?? '';
+    $apiKey = $_ENV['GROQ_API_KEY'] ?? '';
     if ($apiKey === '') {
         error_log('OPENAI_API_KEY is not configured');
         return 'Сервис пока не настроен. Попробуйте позже.';
@@ -53,7 +53,7 @@ function askOpenAI(string $message, array $history, Client $client): string
                 'Content-Type' => 'application/json',
             ],
             'json' => [
-                'model' => 'gpt-4o',
+                'model' => 'openai/gpt-oss-120b',
                 'messages' => $messages,
             ],
         ]);
@@ -115,7 +115,7 @@ if ($userMessage === '') {
 } else {
     $history = $state['messages'];
     $client = new Client([
-        'base_uri' => 'https://api.openai.com',
+        'base_uri' => 'https://api.groq.com/openai',
         'timeout' => 30.0,
         'connect_timeout' => 10.0,
     ]);
