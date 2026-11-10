@@ -85,34 +85,35 @@ if (!is_array($input) || !isset($input['session']['session_id'])) {
     exit;
 }
 
-// A persistent volume can be mounted at /data by the hosting provider.
-$sessionDir = '/data/sessions';
-if (is_dir('/data') && is_writable('/data')) {
-    if (!is_dir($sessionDir)) {
-        @mkdir($sessionDir, 0770, true);
-    }
-    if (is_dir($sessionDir) && is_writable($sessionDir)) {
-        session_save_path($sessionDir);
-    }
-}
-
-if (session_status() !== PHP_SESSION_ACTIVE) {
-    session_start();
-}
-if (!isset($_SESSION['users_state']) || !is_array($_SESSION['users_state'])) {
-    $_SESSION['users_state'] = [];
+// Yandex sends its own session_id; do not rely on browser cookies.
+$stateDir = is_dir('/data') && is_writable('/data')
+    ? '/data/alice-sessions'
+    : sys_get_temp_dir() . '/alice-gpt-sessions';
+if (!is_dir($stateDir) && !@mkdir($stateDir, 0770, true) && !is_dir($stateDir)) {
+    http_response_code(500);
+    echo json_encode(['error' => 'Session storage unavailable'], JSON_UNESCAPED_UNICODE);
+    exit;
 }
 
 $sessionId = (string) $input['session']['session_id'];
-if (!isset($_SESSION['users_state'][$sessionId])) {
-    $_SESSION['users_state'][$sessionId] = ['messages' => []];
+$stateFile = $stateDir . '/' . hash('sha256', $sessionId) . '.json';
+$stateHandle = fopen($stateFile, 'c+');
+if ($stateHandle === false || !flock($stateHandle, LOCK_EX)) {
+    http_response_code(500);
+    echo json_encode(['error' => 'Session storage unavailable'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+$stored = stream_get_contents($stateHandle);
+$state = json_decode($stored ?: '', true);
+if (!is_array($state) || !isset($state['messages']) || !is_array($state['messages'])) {
+    $state = ['messages' => []];
 }
 
 $userMessage = cleanRequest((string) ($input['request']['original_utterance'] ?? ''));
 if ($userMessage === '') {
     $reply = 'Я умный чат-бот. Спроси что-нибудь.';
 } else {
-    $history = $_SESSION['users_state'][$sessionId]['messages'];
+    $history = $state['messages'];
     $client = new Client([
         'base_uri' => 'https://api.openai.com',
         'timeout' => 30.0,
@@ -124,7 +125,14 @@ if ($userMessage === '') {
     // Store a proper user/assistant pair for the next turn.
     $history[] = ['role' => 'user', 'content' => $userMessage];
     $history[] = ['role' => 'assistant', 'content' => $reply];
-    $_SESSION['users_state'][$sessionId]['messages'] = array_slice($history, -20);
+    $state['messages'] = array_slice($history, -20);
 }
+
+rewind($stateHandle);
+ftruncate($stateHandle, 0);
+fwrite($stateHandle, json_encode($state, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE));
+fflush($stateHandle);
+flock($stateHandle, LOCK_UN);
+fclose($stateHandle);
 
 echo json_encode(aliceResponse($input, $reply), JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
