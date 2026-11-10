@@ -1,29 +1,33 @@
 <?php
-require 'vendor/autoload.php';
+declare(strict_types=1);
+
+require __DIR__ . '/vendor/autoload.php';
 
 use Dotenv\Dotenv;
 use GuzzleHttp\Client;
+use GuzzleHttp\Exception\GuzzleException;
 
-// Загрузка переменных окружения
 $dotenv = Dotenv::createImmutable(__DIR__);
-$dotenv->load();
+$dotenv->safeLoad();
 
-// Инициализация клиента OpenAI
-$client = new Client([
-    'base_uri' => 'https://api.openai.com',
-    'timeout'  => 30.0,
-]);
+header('Content-Type: application/json; charset=utf-8');
 
-// Хранение состояния пользователей (можно заменить на базу данных)
-session_start();
-if (!isset($_SESSION['users_state'])) {
-    $_SESSION['users_state'] = [];
+function aliceResponse(array $input, string $text, bool $endSession = false): array
+{
+    return [
+        'version' => $input['version'] ?? '1.0',
+        'session' => $input['session'] ?? new stdClass(),
+        'response' => [
+            'text' => mb_substr($text, 0, 1024),
+            'tts' => mb_substr($text, 0, 1024),
+            'end_session' => $endSession,
+        ],
+    ];
 }
 
-// Функция для очистки приветствия Алисы
-function cleanRequest($request) {
-    $cutWords = ['Алиса', 'алиса'];
-    foreach ($cutWords as $word) {
+function cleanRequest(string $request): string
+{
+    foreach (['Алиса', 'алиса'] as $word) {
         if (mb_stripos($request, $word) === 0) {
             $request = mb_substr($request, mb_strlen($word));
         }
@@ -31,77 +35,96 @@ function cleanRequest($request) {
     return trim($request);
 }
 
-// Функция для взаимодействия с OpenAI
-function askOpenAI($message, $messages, $client) {
-    $apiKey = $_ENV['OPENAI_API_KEY'];
-    $allMessages = $messages;
-    $allMessages[] = $message;
-
-    $formattedMessages = [];
-    foreach ($allMessages as $msg) {
-        $formattedMessages[] = [
-            "role" => "user",
-            "content" => $msg
-        ];
+function askOpenAI(string $message, array $history, Client $client): string
+{
+    $apiKey = $_ENV['OPENAI_API_KEY'] ?? '';
+    if ($apiKey === '') {
+        error_log('OPENAI_API_KEY is not configured');
+        return 'Сервис пока не настроен. Попробуйте позже.';
     }
+
+    $messages = array_slice($history, -20);
+    $messages[] = ['role' => 'user', 'content' => $message];
 
     try {
         $response = $client->post('/v1/chat/completions', [
             'headers' => [
                 'Authorization' => 'Bearer ' . $apiKey,
-                'Content-Type'  => 'application/json',
+                'Content-Type' => 'application/json',
             ],
             'json' => [
                 'model' => 'gpt-4o',
-                'messages' => $formattedMessages
+                'messages' => $messages,
             ],
         ]);
 
-        $body = json_decode($response->getBody(), true);
-        return trim($body['choices'][0]['message']['content']);
-    } catch (Exception $e) {
-        error_log($e->getMessage());
-        return 'Не удалось получить ответ от сервиса.';
+        $body = json_decode((string) $response->getBody(), true);
+        $answer = $body['choices'][0]['message']['content'] ?? null;
+        return is_string($answer) && $answer !== ''
+            ? trim($answer)
+            : 'Не удалось получить ответ от сервиса.';
+    } catch (GuzzleException $e) {
+        error_log('OpenAI request failed: ' . $e->getMessage());
+        return 'Не удалось связаться с сервисом. Попробуйте ещё раз.';
+    } catch (Throwable $e) {
+        error_log('Unexpected error: ' . $e->getMessage());
+        return 'Произошла внутренняя ошибка. Попробуйте позже.';
     }
 }
 
-// Обработка POST-запроса
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $input = json_decode(file_get_contents('php://input'), true);
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+    http_response_code(405);
+    echo json_encode(['error' => 'Method Not Allowed'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
 
-    $response = [
-        'session' => $input['session'],
-        'version' => $input['version'],
-        'response' => [
-            'end_session' => false
-        ]
-    ];
+$input = json_decode((string) file_get_contents('php://input'), true);
+if (!is_array($input) || !isset($input['session']['session_id'])) {
+    http_response_code(400);
+    echo json_encode(['error' => 'Invalid Alice request'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
 
-    $sessionId = $input['session']['session_id'];
-    if (!isset($_SESSION['users_state'][$sessionId])) {
-        $_SESSION['users_state'][$sessionId] = [
-            'messages' => []
-        ];
+// A persistent volume can be mounted at /data by the hosting provider.
+$sessionDir = '/data/sessions';
+if (is_dir('/data') && is_writable('/data')) {
+    if (!is_dir($sessionDir)) {
+        @mkdir($sessionDir, 0770, true);
     }
-
-    $userState = &$_SESSION['users_state'][$sessionId];
-
-    if (!empty($input['request']['original_utterance'])) {
-        $userMessage = cleanRequest($input['request']['original_utterance']);
-        $userState['messages'][] = $userMessage;
-
-        $botReply = askOpenAI($userMessage, $userState['messages'], $client);
-        $response['response']['text'] = $botReply;
-        $response['response']['tts'] = $botReply . '<speaker audio="alice-sounds-things-door-2.opus">';
-    } else {
-        $response['response']['text'] = 'Я умный чат-бот. Спроси что-нибудь.';
-        $response['response']['tts'] = 'Я умный чат-бот. Спроси что-нибудь.';
+    if (is_dir($sessionDir) && is_writable($sessionDir)) {
+        session_save_path($sessionDir);
     }
+}
 
-    header('Content-Type: application/json');
-    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+if (session_status() !== PHP_SESSION_ACTIVE) {
+    session_start();
+}
+if (!isset($_SESSION['users_state']) || !is_array($_SESSION['users_state'])) {
+    $_SESSION['users_state'] = [];
+}
+
+$sessionId = (string) $input['session']['session_id'];
+if (!isset($_SESSION['users_state'][$sessionId])) {
+    $_SESSION['users_state'][$sessionId] = ['messages' => []];
+}
+
+$userMessage = cleanRequest((string) ($input['request']['original_utterance'] ?? ''));
+if ($userMessage === '') {
+    $reply = 'Я умный чат-бот. Спроси что-нибудь.';
 } else {
-    // Обработка других типов запросов, если необходимо
-    header("HTTP/1.1 405 Method Not Allowed");
-    echo "Метод не поддерживается.";
+    $history = $_SESSION['users_state'][$sessionId]['messages'];
+    $client = new Client([
+        'base_uri' => 'https://api.openai.com',
+        'timeout' => 30.0,
+        'connect_timeout' => 10.0,
+    ]);
+
+    $reply = askOpenAI($userMessage, $history, $client);
+
+    // Store a proper user/assistant pair for the next turn.
+    $history[] = ['role' => 'user', 'content' => $userMessage];
+    $history[] = ['role' => 'assistant', 'content' => $reply];
+    $_SESSION['users_state'][$sessionId]['messages'] = array_slice($history, -20);
 }
+
+echo json_encode(aliceResponse($input, $reply), JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
