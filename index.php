@@ -27,11 +27,12 @@ function aliceResponse(array $input, string $text, bool $endSession = false): ar
 
 function cleanRequest(string $request): string
 {
-    foreach (['Алиса', 'алиса'] as $word) {
+    foreach (['Алиса', 'алиса', 'Вася', 'вася'] as $word) {
         if (mb_stripos($request, $word) === 0) {
             $request = mb_substr($request, mb_strlen($word));
         }
     }
+    $request = preg_replace('/^[\\s,.:!?—-]+/u', '', $request) ?? $request;
     return trim($request);
 }
 
@@ -43,7 +44,11 @@ function askOpenAI(string $message, array $history, Client $client): string
         return 'Сервис пока не настроен. Попробуйте позже.';
     }
 
-    $messages = array_slice($history, -20);
+    $messages = [[
+        'role' => 'system',
+        'content' => 'Ты — Вася, дружелюбный голосовой помощник. Всегда отвечай на русском языке, естественно, понятно и по существу. Не называй себя ChatGPT, OpenAI или языковой моделью и не говори, что обучен OpenAI; представляйся Васей только если спрашивают, как тебя зовут. Обычно отвечай кратко — 2–5 предложений, без длинных вступлений и повторов. Если просят подробнее, раскрывай тему. Не выдумывай факты: если не уверен, честно скажи об этом. Старайся укладываться примерно в 800 символов, чтобы Алиса не обрывала ответ. Завершай мысль целиком.'
+    ]];
+    $messages = array_merge($messages, array_slice($history, -18));
     $messages[] = ['role' => 'user', 'content' => $message];
 
     try {
